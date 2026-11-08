@@ -8,16 +8,15 @@ accelerometer can't sense skew/yaw or the table's own slope, so it reports the
 measurement and lets you judge — like a bubble level. See
 [`docs/design.md` → Fundamental sensing limits](docs/design.md).
 
-> Reads the Sensor Processing Unit (SPU) accelerometer via the **private**
-> `IOHIDEventSystemClient` SPI — CoreMotion is unavailable on macOS. See
-> [`docs/design.md`](docs/design.md) for the full design and the hardware
-> investigation behind it.
+> Reads the Sensor Processing Unit (SPU) accelerometer's raw HID reports through
+> the public `IOHIDManager` API — CoreMotion is unavailable on macOS. No root
+> needed. See [`docs/design.md`](docs/design.md) for the full design and the
+> hardware investigation behind it.
 
 ## Build
 
 ```bash
 swift build -c release
-codesign -s - .build/release/laptop-level   # ad-hoc sign for local use
 .build/release/laptop-level
 ```
 
@@ -62,14 +61,13 @@ Exit codes: `0` ok (or within tolerance under `--quiet`) · `1` over tolerance
 
 ## Status
 
-- ✅ Single-shot readout (`L/R`/`B/F`, plain / JSON) + `--quiet` scripting gate,
-  verified on Mac14,5 (M2 Max).
-- ✅ `--watch` live ASCII bubble level: in-place TTY redraw, JSONL when piped,
-  plain non-TTY fallback, clean SIGINT/SIGPIPE handling.
-- ✅ Sensor confirmed **base-mounted** (lid sweep doesn't move the reading), so
-  screen angle doesn't affect the result.
+- ✅ Single-shot readout (`L/R`/`B/F`, plain / JSON), `--quiet` scripting gate,
+  and `--watch` live bubble level on Mac14,5 (M2 Max). Sensor decoding and
+  directions verified by physically tilting the laptop. Directions: `L/R +` = right edge lower, `B/F +` = back edge lower.
 - ⚠️ Only `Mac14,5` has a calibration entry; other models exit `2`. Its offset
-  is a **placeholder** from an arbitrary pose, so angles are relative to that
-  pose — not to true level — until re-measured on a verified-level surface.
+  is `(0, 0)` — not yet measured on a bubble-level-verified surface (expected
+  error well under 1°).
+- ℹ️ Versions before Nov 2026 read the ambient light sensor by mistake and did
+  not measure tilt at all (see design doc → Sensor Access → History).
 
 Tests: `swift test`.

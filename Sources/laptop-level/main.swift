@@ -124,7 +124,7 @@ func runWatch(_ opts: Options, _ offset: ReferenceOffset) -> Never {
     let color = resolveColor(opts.color)
     let sensor: MotionSensor
     do { sensor = try MotionSensor() }
-    catch { die(.noSensor, "error: no readable motion sensor (unsupported hardware or blocked SPI)") }
+    catch { die(.noSensor, "error: no SPU accelerometer found (unsupported hardware)") }
 
     // Ctrl+C, `kill`, and a closed terminal all stop the loop cleanly, so the
     // cursor is always restored.
@@ -197,7 +197,7 @@ let raw: Tilt
 do {
     raw = try MotionSensor.read()
 } catch SensorError.unavailable {
-    die(.noSensor, "error: no readable motion sensor (unsupported hardware or blocked SPI)")
+    die(.noSensor, "error: no SPU accelerometer found (unsupported hardware)")
 } catch SensorError.timeout {
     die(.timeout, "error: sensor present but no stable reading in time")
 } catch {

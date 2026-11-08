@@ -1,43 +1,60 @@
 import XCTest
 @testable import laptop_level
 
-private func rad(_ d: Double) -> Double { d * .pi / 180 }
-
-/// Gravity in the sensor frame for a sensor rotated `mount`° about its X axis,
-/// with the base tilted by `lr`° (left/right) and `bf`° (back/front).
-private func gravity(mount: Double, lr: Double, bf: Double) -> (Double, Double, Double) {
-    // Base tilt: roll about base Y, then pitch about base X (X = hinge axis).
-    let gx = sin(rad(lr))
-    let gyz = cos(rad(lr))
-    let a = rad(mount + bf)
-    return (gx, gyz * sin(a), gyz * cos(a))
+/// Build a 22-byte SPU accel report with x/y/z (in g) at offsets 6/10/14.
+private func report(_ x: Double, _ y: Double, _ z: Double) -> [UInt8] {
+    var r = [UInt8](repeating: 0, count: MotionSensor.reportSize)
+    for (i, v) in [x, y, z].enumerated() {
+        let raw = UInt32(bitPattern: Int32((v * 65536).rounded()))
+        for b in 0..<4 { r[6 + i * 4 + b] = UInt8((raw >> (8 * UInt32(b))) & 0xFF) }
+    }
+    return r
 }
 
-final class TiltTests: XCTestCase {
-    func testDeviationMatchesTrueTiltWithMountingOffset() throws {
-        let mount = 49.5
-        let (x0, y0, z0) = gravity(mount: mount, lr: 0, bf: 0)
-        let ref = try XCTUnwrap(MotionSensor.tilt(x: x0, y: y0, z: z0))
-        for (lr, bf) in [(5.0, 0.0), (10.0, 0.0), (0.0, 5.0), (-3.0, 2.0), (5.0, 5.0)] {
-            let (x, y, z) = gravity(mount: mount, lr: lr, bf: bf)
-            let t = try XCTUnwrap(MotionSensor.tilt(x: x, y: y, z: z))
-            XCTAssertEqual(t.roll - ref.roll, lr, accuracy: 1e-9, "L/R for (\(lr), \(bf))")
-            XCTAssertEqual(t.pitch - ref.pitch, bf, accuracy: 1e-9, "B/F for (\(lr), \(bf))")
-        }
+private func tiltFromReport(_ r: [UInt8]) throws -> Tilt {
+    let g = try XCTUnwrap(r.withUnsafeBufferPointer { MotionSensor.gravity(fromReport: $0) })
+    return try XCTUnwrap(MotionSensor.tilt(x: g.x, y: g.y, z: g.z))
+}
+
+final class ReportTests: XCTestCase {
+    func testDecodesSignedLittleEndianFixedPoint() throws {
+        let g = try XCTUnwrap(report(0.5, -0.25, -0.989).withUnsafeBufferPointer { MotionSensor.gravity(fromReport: $0) })
+        XCTAssertEqual(g.x, 0.5, accuracy: 1e-4)
+        XCTAssertEqual(g.y, -0.25, accuracy: 1e-4)
+        XCTAssertEqual(g.z, -0.989, accuracy: 1e-4)
     }
 
-    func testRawUnitsCancel() throws {
-        let a = try XCTUnwrap(MotionSensor.tilt(x: 139, y: 1368, z: 1164))
-        let b = try XCTUnwrap(MotionSensor.tilt(x: 1390, y: 13680, z: 11640))
+    func testShortReportIsRejected() {
+        let short = [UInt8](repeating: 0, count: 17)
+        XCTAssertNil(short.withUnsafeBufferPointer { MotionSensor.gravity(fromReport: $0) })
+    }
+}
+
+/// Samples logged on Mac14,5 (2026-11-08) while physically tilting the laptop.
+final class TiltTests: XCTestCase {
+    func testFlatOnDesk() throws {
+        let t = try tiltFromReport(report(0.004, 0.015, -0.982))
+        XCTAssertEqual(t.roll, 0.23, accuracy: 0.05)
+        XCTAssertEqual(t.pitch, 0.88, accuracy: 0.05)
+    }
+
+    func testLeftEdgeLiftedReadsPositiveLR() throws {
+        let t = try tiltFromReport(report(0.137, 0.016, -0.968))
+        XCTAssertEqual(t.roll, 8.03, accuracy: 0.05)
+        XCTAssertEqual(t.pitch, 0.94, accuracy: 0.1)
+    }
+
+    func testFrontDownReadsNegativeBF() throws {
+        let t = try tiltFromReport(report(0.006, -0.315, -0.928))
+        XCTAssertEqual(t.pitch, -18.72, accuracy: 0.05)
+        XCTAssertEqual(t.roll, 0.37, accuracy: 0.05)
+    }
+
+    func testRawScaleCancels() throws {
+        let a = try XCTUnwrap(MotionSensor.tilt(x: 0.137, y: 0.016, z: -0.968))
+        let b = try XCTUnwrap(MotionSensor.tilt(x: 1.37, y: 0.16, z: -9.68))
         XCTAssertEqual(a.pitch, b.pitch, accuracy: 1e-12)
         XCTAssertEqual(a.roll, b.roll, accuracy: 1e-12)
-    }
-
-    func testLiveSampleFromMac14_5() throws {
-        // Sample logged on Mac14,5 on 2026-11-08, laptop resting on a desk.
-        let t = try XCTUnwrap(MotionSensor.tilt(x: 139, y: 1368, z: 1164))
-        XCTAssertEqual(t.pitch, 49.6, accuracy: 0.1)
-        XCTAssertEqual(t.roll, 4.4, accuracy: 0.1)
     }
 
     func testUnusableVectorsAreRejected() {

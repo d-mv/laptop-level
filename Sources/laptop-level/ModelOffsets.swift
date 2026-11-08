@@ -1,13 +1,14 @@
 import Foundation
 
-/// Per-model reference pose. The SPU accelerometer carries a large constant
-/// mounting offset, so "straight" is defined as deviation from these values.
-///
+/// Per-model reference pose: what the sensor reads on a truly level surface.
 /// Values are in the convention of `MotionSensor.tilt(x:y:z:)`.
 ///
-/// ⚠️ Mac14,5 value comes from the spike's raw sample (x≈1000, y≈9600, z≈8080),
-/// taken in an arbitrary pose — it is a PLACEHOLDER and must be re-measured on
-/// a verified-level surface. See docs/design.md → "Calibration / reference pose".
+/// The accelerometer lies flat in the base, so offsets are small (board
+/// mounting tolerance only).
+///
+/// ⚠️ Mac14,5 is set to (0, 0) — NOT yet measured on a verified-level surface.
+/// On an ordinary desk it read about L/R +0.3°, B/F +0.8°, but that includes
+/// the desk's own slope. See docs/design.md → "Calibration / reference pose".
 struct ReferenceOffset {
     let pitch0: Double
     let roll0: Double
@@ -26,7 +27,7 @@ func wrapDeg(_ v: Double) -> Double {
 }
 
 let modelOffsets: [String: ReferenceOffset] = [
-    "Mac14,5": ReferenceOffset(pitch0: 49.9, roll0: 4.6),
+    "Mac14,5": ReferenceOffset(pitch0: 0, roll0: 0),
 ]
 
 /// Reads `hw.model` (e.g. "Mac14,5").

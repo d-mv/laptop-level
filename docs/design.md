@@ -7,21 +7,13 @@ its tilt** as two angles — left/right (L/R) and back/front (B/F). It does *not
 pronounce a verdict like "straight"; it reports the measurement and lets the
 human read it (see [Fundamental sensing limits](#fundamental-sensing-limits) for
 why a verdict would be dishonest). Targets Apple Silicon Macs. Single binary, no
-third-party dependencies — but it links private system SPI (see
-[Sensor Access](#sensor-access)).
+third-party dependencies, public IOKit API only.
 
-> **Hardware reality (verified on Mac14,5 / M2 Max, macOS 26.4 SDK):**
+> **Hardware reality (verified on Mac14,5 / M2 Max, macOS 26.6):**
 > Apple Silicon laptops expose an accelerometer + gyro through the **Sensor
-> Processing Unit (SPU)** as IOKit HID interfaces (`accel`, `gyro`,
-> `devmotion6` under `AppleSPUHIDInterface`). **CoreMotion is not an option** —
-> `CMMotionManager` and `CMAltimeter` are `API_UNAVAILABLE(macos)` and will not
-> compile. The only way to read this sensor is the private `IOHIDEventSystemClient`
-> SPI. This is undocumented, version-fragile, and requires a signed binary.
->
-> **Spike status (proven, not theoretical):** a C spike against the private SPI
-> reads live, stable 3-axis data and exits 0 — even unsigned in an interactive
-> terminal. See [Spike results](#spike-results-proven) for the exact constants
-> and the calibration consequence.
+> Processing Unit (SPU)** as IOKit HID devices. **CoreMotion is not an
+> option** — its motion classes are `API_UNAVAILABLE(macos)`. The tool reads the
+> accelerometer's raw HID input reports with the public `IOHIDManager` API.
 
 ---
 
@@ -30,189 +22,129 @@ third-party dependencies — but it links private system SPI (see
 ### Why not CoreMotion
 
 `import CoreMotion` compiles, but every motion class (`CMMotionManager`,
-`CMDeviceMotion`, `CMAltimeter`, …) is marked `API_UNAVAILABLE(macos)`. Using
-`attitude.pitch`/`attitude.roll` is impossible on macOS — verified by a failed
-build against the current SDK. The original design assumed an iOS API surface
-that does not exist here.
+`CMDeviceMotion`, `CMAltimeter`, …) is marked `API_UNAVAILABLE(macos)`.
+Separately, `CMAttitude` is rotation relative to where tracking *started*, not
+tilt from horizontal. We want tilt relative to **gravity**, so we read the raw
+gravity vector and derive the angles ourselves.
 
-Separately, `attitude` would have been the *wrong* quantity anyway: `CMAttitude`
-is rotation relative to the reference frame captured when tracking *started*, not
-absolute tilt from horizontal. We want tilt relative to **gravity**, so we read
-the raw gravity vector and derive the angles ourselves.
+### The path: raw HID input reports via `IOHIDManager`
 
-### The viable path: `IOHIDEventSystemClient` SPI
-
-The SPU accelerometer is enumerated as an `AppleSPUHIDInterface` with:
+The SPU accelerometer is an `AppleSPUHIDDevice` with:
 
 | Property | Value |
 |---|---|
-| `device_type` | `"accel"` |
-| `device-usage-page` | `0xff00` (vendor-defined) |
-| `device-usage` | `0x03` |
-
-Read sequence (all symbols are **private SPI** — declared by hand, see below):
+| `PrimaryUsagePage` | `0xff00` (vendor-defined) |
+| `PrimaryUsage` | `0x03` |
+| `Transport` | `"SPU"` (the internal keyboard/trackpad also uses usage 3, on `FIFO`) |
+| `MaxInputReportSize` | `22` |
 
 ```
-IOHIDEventSystemClientCreate(kCFAllocatorDefault)
-  → IOHIDEventSystemClientCopyServices() → probe each service for an accel event,
-    keep the one that answers (no matching dict; see the usage 0x03/0x04 note below)
-  → IOHIDServiceClientCopyEvent(service, kIOHIDEventTypeAccelerometer, 0, 0)
-  → IOHIDEventGetFloatValue(event, field)   // field = (kIOHIDEventTypeAccelerometer << 16) + axis
+IOHIDManagerCreate
+  → match { PrimaryUsagePage: 0xff00, PrimaryUsage: 3, Transport: "SPU" }
+  → IOHIDManagerOpen → IOHIDDeviceRegisterInputReportCallback → schedule on run loop
+  → each 22-byte report: x, y, z = little-endian Int32 at offsets 6, 10, 14
+                         gravity (g) = value / 65536
 ```
 
-Constants (`kIOHIDEventTypeAccelerometer = 12`; axes X=0, Y=1, Z=2) are not in
-any public header. **These are now confirmed** on Mac14,5 by the spike (below) —
-but re-verify on any untested OS/model before trusting them.
+- Reports arrive at ~100 Hz once the device is open; no root, no entitlement.
+- If no report arrives within 300 ms, the tool sets
+  `SensorPropertyReportingState = 1`, `SensorPropertyPowerState = 1` and
+  `ReportInterval = 10000` on the usage-3 `AppleSPUHIDDriver`, then waits again.
+  (It is not yet known whether a freshly booted Mac needs this; on the test
+  machine reports flowed without it, but only after it had been set once in that
+  boot.)
+- Flat on a desk the sensor reads g ≈ (0.00, 0.01, −0.99): it lies flat in the
+  **base**, with Z pointing down.
 
-### Spike results (proven)
+### ⚠️ History: the first sensor path read the wrong sensor
 
-A standalone C spike (declared the six SPI symbols, linked `IOKit` +
-`CoreFoundation`) produced:
+The original implementation used the private `IOHIDEventSystemClient` SPI and
+asked services for HID event **type 12**, believing it was the accelerometer.
+Type 12 is `AmbientLightSensor` (accelerometer is 13). The only service that
+answered was `AppleSPUVD6286` — an ambient light / colour sensor — so the tool
+was reporting light-sensor channels as x/y/z. That explains the old symptoms: a
+constant "≈50° mounting offset", a "magnitude" that drifted with room light,
+and readings that ignored both lid angle and physical tilt. No service answers
+type 13 through that SPI, so it was dropped entirely.
 
-- `IOHIDEventSystemClientCopyServices` returned 182 services; exactly one
-  answered an accelerometer event.
-- That service reports `PrimaryUsagePage = 0xff00`, **`PrimaryUsage = 0x04`**
-  (note: the HID *event service* reports usage `0x04`, whereas the raw `accel`
-  IORegistry node showed `device-usage 0x03` — match the **event** value `0x04`,
-  or simply probe every service for an accel event and keep the one that
-  answers).
-- Live read: `raw(x≈1000, y≈9600, z≈8080)`, vector magnitude **≈ 12,500**
-  (raw units, **not** normalized to 1 g — irrelevant for `atan2`, which uses
-  ratios).
-- ⚠️ **The raw scale is not stable.** A later read (2026-11-08) gave a
-  magnitude of ≈ 1,700, drifting ±5% over a few seconds while the laptop sat
-  still, with the angles steady to ~0.05°. Use the vector only for ratios —
-  never treat its magnitude as g or use it for motion/sanity checks.
-- Five samples over 1 s agreed to within ~0.1° (sensor is low-noise), while
-  magnitude crept 12527 → 12594 — **confirming the warm-up settle delay is real
-  and necessary.**
-- Worked **unsigned** from an interactive terminal. Signing may still be needed
-  for non-interactive/daemon contexts — keep the codesign step.
+Lesson: confirm a sensor by **moving the hardware**, not by getting stable
+numbers back.
 
-### Calibration consequence (decision needed)
+### Axis orientation (measured)
 
-At physical rest the sensor reads **pitch ≈ +49.9°, roll ≈ +4.6°** (current
-formulas), not `(0, 0)`. The sensor carries a large constant **mounting
-offset**: it sits in the **base**, rotated ~50° about its X axis (see
-[Sensor location](#sensor-location-resolved-base-mounted)). Therefore
-"straight" **cannot** be defined as raw `(0, 0)`; the tool must subtract a
-**reference pose** `(pitch₀, roll₀)` captured when the machine is known-level,
-and test the *deviation* `(pitch − pitch₀, roll − roll₀)` against the threshold.
+Measured on Mac14,5 by lifting edges while logging raw reports (2026-11-08):
+
+| Pose | g (x, y, z) | L/R | B/F |
+|---|---|---|---|
+| Flat on desk | (+0.004, +0.015, −0.982) | +0.2° | +0.9° |
+| Left edge lifted (right lower) | (+0.137, +0.016, −0.968) | **+8.0°** | +0.9° |
+| Back edge lifted (front lower) | (+0.006, −0.315, −0.928) | +0.4° | **−18.7°** |
+
+So **+X = right edge lower** and **+Y = back edge lower**, which matches the
+CLI's labels directly (`L/R` `+` = right, `B/F` `+` = back). No axis remapping.
+
+### Deriving pitch & roll from gravity
+
+Given gravity `(gx, gy, gz)` (units cancel):
+
+```
+roll  = atan2(gx, hypot(gy, gz)) * 180/π    // L/R, + = right edge lower
+pitch = atan2(gy, hypot(gx, gz)) * 180/π    // B/F, + = back edge lower
+```
+
+then subtract the per-model `(pitch₀, roll₀)` and wrap to (−180°, 180°]. Each
+angle is measured against the other two components, so it stays accurate when
+the laptop is tilted on both axes.
 
 ## Calibration / reference pose
 
 **Decision: hard-coded per-model offset table.** No user calibration flag. The
 tool looks up `hw.model` (via `sysctlbyname`) in a built-in table of
 `(pitch₀, roll₀)` reference offsets and reports the deviation. Unrecognized
-model → exit `2` (unsupported), with a stderr hint to contribute a measurement.
+model → exit `2` (unsupported).
 
 ```swift
 // ModelOffsets.swift — extend as models are measured on a known-level surface
 let modelOffsets: [String: ReferenceOffset] = [
-    "Mac14,5": ReferenceOffset(pitch0: 49.9, roll0: 4.6),   // PLACEHOLDER, re-measure level
+    "Mac14,5": ReferenceOffset(pitch0: 0, roll0: 0),   // NOT yet measured level
 ]
 ```
 
-> ⚠️ The `Mac14,5` value above comes from the spike's raw sample, taken in an
-> *arbitrary* pose, not a verified-level one. Re-measure on a known-flat
-> surface (real bubble level) before trusting it. Offsets are only valid for
-> the formulas in [Deriving pitch & roll](#deriving-pitch--roll-from-gravity);
-> re-capture them if those formulas change.
-
-### Sensor location (resolved: base-mounted)
-
-The ~50° rest pitch first suggested a lid-mounted sensor, which would have made
-a fixed offset useless. Tested on Mac14,5 (2026-11-08) by logging the
-lid-angle sensor (HID usage page `0x20`, usage `0x8A`, feature report 1,
-angle = little-endian bytes 1–2) next to the accelerometer while moving the
-lid:
-
-| Lid angle | B/F (pitch) |
-|---|---|
-| 112° | 49.5° |
-| 54° | 49.5° |
-| 7° | 48.0° |
-| 99° | 49.8° |
-| 110° | 49.7° |
-
-A ~105° lid sweep moved pitch by ≤ 2° (the dip near closed is consistent with
-hand pressure on the base). **The accelerometer is in the base**; the ~50° is a
-fixed mounting rotation, so a per-model constant offset is valid.
-
-### Axis orientation is undocumented → one-time calibration
-
-The SPU does not document which physical axis is X/Y/Z or their sign. Bring-up
-includes a manual mapping step: lay the laptop flat (gravity should read ≈ `1g`
-on one axis, ≈ `0` on the other two), then tip it nose-down and right-side-down
-to fix the sign of pitch and roll. Bake the resulting mapping in as constants.
-This is *not* user-facing calibration (still out of scope) — it's a build-time
-constant determined once.
-
-### Deriving pitch & roll from gravity
-
-Given the raw gravity vector `(gx, gy, gz)` (units cancel):
-
-```
-pitch = atan2(gy, gz) * 180/π               // back/front tilt (B/F)
-roll  = atan2(gx, hypot(gy, gz)) * 180/π    // left/right tilt (L/R)
-```
-
-then subtract the per-model `(pitch₀, roll₀)`.
-
-Why these and not `roll = atan2(gx, gz)`, `pitch = atan2(gy, hypot(gx, gz))`:
-the sensor is rotated ~50° about X, so at rest gravity is split between Y and Z.
-With `atan2(gx, gz)`, Z carries only cos 50° ≈ 0.65 of gravity, so roll was
-inflated ~1.5× (a true 5° read as ~7.6°) and pitch leaked into roll; subtracting
-angle offsets did not cancel that. Measuring pitch inside the Y–Z plane and
-roll against the full Y–Z component makes the subtraction exact for a mounting
-rotation about X (covered by `Tests/laptop-levelTests/TiltTests.swift`).
-
-Sign conventions (`+` = right / back) are still pending the physical axis
-calibration step above.
-
-### Distribution constraints (consequences of using SPI)
-
-- **Codesigning required.** Unsigned binaries may fail to attach to the HID
-  service. Sign with a Developer ID (ad-hoc for local use).
-- **Not App Store distributable** — uses private API.
-- **Version-fragile** — the SPI and constants can change between macOS releases.
-  Treat a clean failure (exit `2`) as expected on unverified OS versions.
-- **No sandbox.** The tool cannot be sandboxed and reach the sensor.
+> ⚠️ Because the sensor lies flat in the base, the offset is only board
+> mounting tolerance (expected well under 1°). `Mac14,5` is `(0, 0)` until it
+> is measured on a surface verified with a real bubble level. On an ordinary
+> desk it read about L/R +0.2°, B/F +0.9°, but that includes the desk's slope.
 
 ---
 
 ## Fundamental sensing limits
 
 This is *why the tool only displays angles and never claims "straight."* A
-resting accelerometer (the only signal available — see below) cannot answer
-"is the laptop standing perfectly straight on the table." Three independent
-walls:
+resting accelerometer cannot answer "is the laptop standing perfectly straight
+on the table." Two independent walls:
 
 1. **Only 2 of 3 orientation DOF are observable.** At rest the accelerometer
    sees one thing: the **gravity vector**. That fixes **pitch and roll** (tilt)
    but reveals **nothing about yaw** — rotation about the vertical axis. Spin
    the laptop flat like a turntable and the reading is unchanged. So "straight"
-   in the sense of *squared-up / not skewed to the desk* is mathematically
-   invisible here.
+   in the sense of *squared-up / not skewed to the desk* is invisible here.
    - The **gyro** can't fix this: it measures angular *rate* (≈0 at rest;
      integrating drifts without bound). It tracks change, never absolute heading.
-   - A **magnetometer** would give heading — but **this Mac has none** (verified:
-     no magnetometer in the IORegistry). And even a compass gives north, not
-     your physical desk edge. True squareness needs vision. **Conclusion:
-     yaw-straightness is unmeasurable on this hardware.**
+   - A **magnetometer** would give heading — but **this Mac has none** (no
+     magnetometer in the IORegistry). And even a compass gives north, not your
+     desk edge. **Conclusion: yaw-straightness is unmeasurable on this hardware.**
 
 2. **The measured tilt is relative to gravity, not the table.** `pitch=roll=0`
    means "level w.r.t. gravity," which equals "flat on the table" *only if the
-   table is horizontal*. On a sloped desk, a flush laptop reads tilted and a
-   "level" laptop isn't flush. The sensor has no table reference.
+   table is horizontal*. On a sloped desk, a flush laptop reads tilted. The
+   sensor has no table reference.
 
-3. ~~The sensor is lid-mounted~~ — **disproved**: the sensor is in the base
-   (see [Sensor location](#sensor-location-resolved-base-mounted)), so the tilt
-   describes the base and does not change with screen angle.
+The sensor is in the base, so the reading describes the base and does not
+change with screen angle.
 
-A physical bubble level shares both remaining walls and nobody objects, because
-"level" is understood as *relative to gravity*. So the honest design is: **report
-the two gravity-relative angles, label their directions, and let the user judge.**
+A physical bubble level shares both walls and nobody objects, because "level"
+is understood as *relative to gravity*. So the honest design is: **report the
+two gravity-relative angles, label their directions, and let the user judge.**
 Hence no "Straight/Tilted" verdict in the default output.
 
 ---
@@ -341,7 +273,7 @@ tolerance check `--quiet` uses. Human-facing output never shows it.
 |---|---|
 | `0` | Read OK (default/JSON), or within tolerance under `--quiet` |
 | `1` | `--quiet` only: tilt exceeded `--threshold` |
-| `2` | No usable sensor (Intel/unsupported, SPU accel absent, or SPI/signing blocked attach) |
+| `2` | No usable sensor (Intel/unsupported model, or SPU accel device absent/unopenable) |
 | `3` | Sensor present but no stable reading within timeout (single-shot), or it stopped answering for 2 s (`--watch`) |
 | `64` | Usage error (bad flags / incompatible flag combination) — `EX_USAGE` |
 
@@ -358,30 +290,19 @@ a human-readable reason is written to **stderr**.
 
 ```
 laptop-level/
-├── Package.swift          # SwiftPM manifest
-└── Sources/
-    ├── CHIDSPI/                  # C interop module exposing the private SPI
-    │   ├── include/CHIDSPI.h         # hand-declared IOHIDEventSystemClient symbols
-    │   └── shim.c                    # empty TU (SwiftPM needs ≥1 source)
-    └── laptop-level/
-        ├── main.swift            # Arg parsing, offset subtract, exit-code dispatch  ✅ built
-        ├── SensorReader.swift    # SPU accel via IOHIDEventSystemClient, gravity→pitch/roll  ✅ built
-        ├── ModelOffsets.swift    # hw.model → reference offset table  ✅ built
-        └── Renderer.swift        # ASCII bubble level, ANSI/color, TTY  ✅ built
-Tests/
-└── laptop-levelTests/
-    └── TiltTests.swift           # tilt math vs mounting offset, renderer geometry (`swift test`)
+├── Package.swift                 # SwiftPM manifest (macOS 12+, links IOKit)
+├── Sources/laptop-level/
+│   ├── main.swift                # Arg parsing, offset subtract, watch loop, exit codes
+│   ├── SensorReader.swift        # SPU accel via IOHIDManager reports → gravity → tilt
+│   ├── ModelOffsets.swift        # hw.model → reference offset table, angle wrapping
+│   └── Renderer.swift            # ASCII bubble level, ANSI/color
+└── Tests/laptop-levelTests/
+    └── TiltTests.swift           # report decoding, tilt vs logged samples, wrap, renderer
 ```
 
-The private HID symbols cannot be imported from a public framework, so they are
-re-declared in a small C interop module (`CHIDSPI`). It's a plain `.target`
-(not `.systemLibrary`) — SwiftPM auto-generates the module map from the umbrella
-header; the extern symbols resolve against the linked `IOKit` framework.
-
-**Status:** fully implemented and verified against live hardware — single-shot
-readout (`L/R`/`B/F`, plain + JSON), the `--quiet` scripting gate, **and**
-`--watch` (live ASCII bubble level over a pty, JSONL when piped, plain non-TTY
-fallback, SIGINT/SIGPIPE-clean).
+**Status:** single-shot readout (plain + JSON), the `--quiet` gate and `--watch`
+verified against live hardware with physical tilt on Mac14,5. Reference offset
+still unmeasured (see above).
 
 ### Package.swift
 
@@ -391,39 +312,36 @@ import PackageDescription
 
 let package = Package(
     name: "laptop-level",
+    platforms: [.macOS(.v12)],
     targets: [
-        .target(name: "CHIDSPI"),   // Sources/CHIDSPI/{include/CHIDSPI.h, shim.c}
         .executableTarget(
             name: "laptop-level",
-            dependencies: ["CHIDSPI"],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreFoundation"),
             ]
         ),
+        .testTarget(name: "laptop-levelTests", dependencies: ["laptop-level"]),
     ]
 )
 ```
 
-> Do **not** use `swiftSettings: [.unsafeFlags(["-framework", ...])]` — SwiftPM
-> rejects `unsafeFlags` for consumable packages and it's the wrong mechanism.
-> Link via `linkerSettings.linkedFramework`. CoreMotion is **not** linked.
-
 ### SensorReader
 
-- Create `IOHIDEventSystemClient`, copy all services, and keep the first one
-  that answers an accelerometer event (no usage matching).
-- Poll `IOHIDServiceClientCopyEvent` for `kIOHIDEventTypeAccelerometer`; read
-  X/Y/Z float values; convert with `MotionSensor.tilt(x:y:z:)`. A non-finite or
-  zero vector counts as "no sample", so NaN never reaches the output.
+- Open the SPU accel device with `IOHIDManager` (see Sensor Access) and register
+  an input-report callback on the current run loop.
+- `currentTilt()` drains queued reports, then waits up to 250 ms for one more so
+  the value is current. Decoding (`gravity(fromReport:)`) and angle math
+  (`tilt(x:y:z:)`) are pure functions covered by tests. A non-finite or zero
+  vector counts as "no sample", so NaN never reaches the output.
 - Subtract the model offset with `ReferenceOffset.deviation(of:)`, which wraps
   both angles to (-180°, 180°].
-- **Settle:** discard readings for the first 300 ms (sensor warm-up), in both
-  single-shot and `--watch`. Single-shot then reports once two consecutive
-  samples (50 ms apart) agree within 0.5°.
+- **Settle:** discard readings for the first 300 ms, in both single-shot and
+  `--watch`. Single-shot then reports once two consecutive samples (50 ms
+  apart) agree within 0.5°.
 - **Timeout:** single-shot with no stable reading within 2 s → exit `3`;
   `--watch` with no sample for 2 s → restore cursor, exit `3`.
-- If the service can't be created/matched → exit `2` with a stderr reason.
+- Device missing or can't be opened → exit `2` with a stderr reason.
 
 Tunables `MotionSensor.settleMs = 300`, `timeoutMs = 2000`, and the 500 ms watch
 interval are fixed constants by design (not flags).
@@ -446,14 +364,14 @@ walk; any error exits `64` with a message on stderr.
 
 ---
 
-## Build, Sign & Install
+## Build & Install
 
 ```bash
-# Build
+# Build (the linker ad-hoc signs arm64 binaries; no extra codesign step needed)
 swift build -c release
 
-# Sign (required to attach to the HID sensor service; ad-hoc for local use)
-codesign -s - .build/release/laptop-level
+# Test
+swift test
 
 # Run
 .build/release/laptop-level
@@ -473,15 +391,14 @@ laptop-level --quiet || { echo "Please level the laptop first"; exit 1; }
 
 ---
 
-## Bring-up checklist (do this first)
+## Bring-up checklist (new model)
 
-1. Confirm `accel` exists: `ioreg -n accel -r -d 1` shows `device_type = "accel"`.
-2. Spike the SPI read in isolation — print raw X/Y/Z; confirm `kIOHIDEventTypeAccelerometer`
-   and field constants actually return live data.
-3. Calibrate axis mapping + signs (flat, nose-down, right-down).
-4. Only then build the CLI/renderer on top.
-
-If step 2 fails on the target OS, the whole tool degrades to a clean exit `2`.
+1. Confirm the device: `ioreg -r -c AppleSPUHIDDevice -l | grep -E 'PrimaryUsage|MaxInputReportSize'`
+   shows usage page `65280`, usage `3`, report size `22`.
+2. **Move the hardware**: log raw reports while lifting the left edge and the
+   back edge; confirm the axes and signs match the table above.
+3. Measure the reference offset on a bubble-level-verified surface and add it
+   to `modelOffsets`.
 
 ---
 
@@ -495,6 +412,6 @@ If step 2 fails on the target OS, the whole tool degrades to a clean exit `2`.
 - **Table-slope compensation** — no table reference exists.
 - Intel Mac support (different/likely-absent sensor path)
 - GUI / menu bar app
-- User-facing calibration (build-time axis mapping is internal, see above)
+- User-facing calibration (offsets are measured once per model, see above)
 - Logging / history
-- App Store distribution (precluded by private SPI)
+- App Store distribution
