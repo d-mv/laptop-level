@@ -165,9 +165,11 @@ func runWatch(_ opts: Options, _ offset: ReferenceOffset) -> Never {
             let straight = deviation(pitch: pitch, roll: roll, metric: opts.metric) <= opts.threshold
             print(jsonLine(pitch: pitch, roll: roll, opts: opts, straight: straight))
         } else if isTTY {
-            if !first { print("\u{001B}[\(frameHeight)A", terminator: "") }
+            // One write per frame: move up, then overwrite each line and clear
+            // its tail. Avoids the flicker of clearing lines before drawing.
+            let up = first ? "" : "\u{001B}[\(frameHeight)A"
             let lines = Renderer.frame(pitch: pitch, roll: roll, color: color)
-            for line in lines { print("\r\u{001B}[2K" + line) }   // clear line, then content
+            print(up + lines.map { "\r" + $0 + "\u{001B}[K" }.joined(separator: "\n"))
             first = false
         } else {
             print(Renderer.readout(pitch: pitch, roll: roll))
@@ -175,7 +177,9 @@ func runWatch(_ opts: Options, _ offset: ReferenceOffset) -> Never {
         // Flush each frame: piped stdout is block-buffered, which would both
         // delay output and defer the broken-pipe SIGPIPE until the buffer fills.
         fflush(stdout)
-        usleep(500_000)
+        // The box redraws at 20 fps for smooth motion; JSONL and plain lines
+        // stay at 2 per second so scripts and logs aren't flooded.
+        usleep(drawsBox ? 50_000 : 500_000)
     }
     restoreCursor()
     exit(0)

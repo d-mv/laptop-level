@@ -64,6 +64,28 @@ final class TiltTests: XCTestCase {
     }
 }
 
+final class AverageTests: XCTestCase {
+    func testAveragesVectorsComponentwise() throws {
+        let g = try XCTUnwrap(MotionSensor.average([(0.1, 0.0, -1.0), (0.3, -0.2, -0.9)]))
+        XCTAssertEqual(g.x, 0.2, accuracy: 1e-12)
+        XCTAssertEqual(g.y, -0.1, accuracy: 1e-12)
+        XCTAssertEqual(g.z, -0.95, accuracy: 1e-12)
+    }
+
+    func testEmptyWindowHasNoReading() {
+        XCTAssertNil(MotionSensor.average([]))
+    }
+
+    func testAveragingCancelsSymmetricNoise() throws {
+        let noisy: [MotionSensor.Gravity] = [(0.14, 0.02, -0.97), (0.12, 0.00, -0.97)]
+        let g = try XCTUnwrap(MotionSensor.average(noisy))
+        let t = try XCTUnwrap(MotionSensor.tilt(x: g.x, y: g.y, z: g.z))
+        let mid = try XCTUnwrap(MotionSensor.tilt(x: 0.13, y: 0.01, z: -0.97))
+        XCTAssertEqual(t.roll, mid.roll, accuracy: 1e-9)
+        XCTAssertEqual(t.pitch, mid.pitch, accuracy: 1e-9)
+    }
+}
+
 final class OffsetTests: XCTestCase {
     func testWrapDeg() {
         XCTAssertEqual(wrapDeg(0), 0)

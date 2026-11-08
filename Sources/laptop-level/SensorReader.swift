@@ -19,13 +19,17 @@ struct Tilt {
 /// report carries x/y/z as little-endian Int32 at offsets 6/10/14, in units of
 /// 1/65536 g, at ~100 Hz. Reports are delivered on the current run loop, which
 /// `currentTilt()` pumps — so use one instance from one thread.
+///
+/// Readings are smoothed by averaging the gravity vector over the last
+/// `windowSize` reports (~250 ms), which cuts jitter at the cost of ~0.1 s lag.
 final class MotionSensor {
     static let settleMs = 300
     static let timeoutMs = 2000
+    static let windowSize = 25          // reports averaged per reading (~250 ms)
 
     private let manager: IOHIDManager
     private let buffer: UnsafeMutablePointer<UInt8>
-    private var latest: Tilt?
+    private var window: [Gravity] = []
     private var sampleCount = 0
 
     init() throws {
@@ -66,9 +70,9 @@ final class MotionSensor {
     }
 
     private func receive(_ report: UnsafeBufferPointer<UInt8>) {
-        guard let g = Self.gravity(fromReport: report),
-              let t = Self.tilt(x: g.x, y: g.y, z: g.z) else { return }
-        latest = t
+        guard let g = Self.gravity(fromReport: report), Self.tilt(x: g.x, y: g.y, z: g.z) != nil else { return }
+        window.append(g)
+        if window.count > Self.windowSize { window.removeFirst(window.count - Self.windowSize) }
         sampleCount += 1
     }
 
@@ -81,19 +85,32 @@ final class MotionSensor {
         return sampleCount > count
     }
 
-    /// Freshest sample: drain queued reports, then wait for one more so the
-    /// value is current. Nil if the sensor stopped answering.
+    /// Current smoothed reading: drain queued reports, wait for one more so
+    /// the window is current, then average it. Nil if the sensor stopped
+    /// answering.
     func currentTilt() -> Tilt? {
         while CFRunLoopRunInMode(.defaultMode, 0, true) == .handledSource {}
-        return waitForSample(after: sampleCount, seconds: 0.25) ? latest : nil
+        guard waitForSample(after: sampleCount, seconds: 0.25), let g = Self.average(window) else { return nil }
+        return Self.tilt(x: g.x, y: g.y, z: g.z)
     }
 
     // MARK: - Pure helpers (tested)
 
     static let reportSize = 22
 
+    typealias Gravity = (x: Double, y: Double, z: Double)
+
+    /// Mean gravity vector. Averaging vectors (not angles) keeps the result
+    /// correct at any tilt.
+    static func average(_ samples: [Gravity]) -> Gravity? {
+        guard !samples.isEmpty else { return nil }
+        let n = Double(samples.count)
+        let sum = samples.reduce((x: 0.0, y: 0.0, z: 0.0)) { (x: $0.x + $1.x, y: $0.y + $1.y, z: $0.z + $1.z) }
+        return (sum.x / n, sum.y / n, sum.z / n)
+    }
+
     /// Raw accel report → gravity in g, or nil if it's too short.
-    static func gravity(fromReport r: UnsafeBufferPointer<UInt8>) -> (x: Double, y: Double, z: Double)? {
+    static func gravity(fromReport r: UnsafeBufferPointer<UInt8>) -> Gravity? {
         guard r.count >= 18 else { return nil }
         func int32(_ o: Int) -> Double {
             Double(Int32(bitPattern: UInt32(r[o]) | UInt32(r[o + 1]) << 8 | UInt32(r[o + 2]) << 16 | UInt32(r[o + 3]) << 24))

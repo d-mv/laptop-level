@@ -163,7 +163,7 @@ Single-shot read. Prints the two angles on one line and exits.
 
 | Flag | Description |
 |---|---|
-| `--watch` | Continuous mode — refresh every 500 ms, live in-place output |
+| `--watch` | Continuous mode — live in-place box at ~20 fps; JSONL / plain lines every 500 ms |
 | `--format json` | Output as JSON. With `--watch`, emits one JSON object per line (JSONL) |
 | `--color auto\|always\|never` | ANSI color for the watch bubble (default: `auto` — TTY only) |
 | `--quiet` | No output; **the only** pass/fail path — exit by `--threshold` (for scripts) |
@@ -233,7 +233,8 @@ Press Ctrl+C to stop
 - **Color is a magnitude scale, not a verdict:** green near center → yellow →
   red toward the edge (thirds of full scale). It visualizes *how far off level*,
   not "good/bad".
-- Box is 29×11 chars, redrawn in-place each frame. Resolution ≈ 1.15°/column
+- Box is 29×11 chars, redrawn in-place ~20 times per second (one write per
+  frame, each line overwritten then its tail cleared, so no flicker). Resolution ≈ 1.15°/column
   (L/R) and 3.75°/row (B/F); the bubble leaves the center row at |B/F| ≥ ~1.9°.
 - If stdout is **not a TTY**, `--watch` falls back to plain readout lines
   (one per refresh) instead of cursor manipulation.
@@ -330,8 +331,11 @@ let package = Package(
 
 - Open the SPU accel device with `IOHIDManager` (see Sensor Access) and register
   an input-report callback on the current run loop.
-- `currentTilt()` drains queued reports, then waits up to 250 ms for one more so
-  the value is current. Decoding (`gravity(fromReport:)`) and angle math
+- `currentTilt()` drains queued reports, waits up to 250 ms for one more so
+  the value is current, then returns the tilt of the **mean gravity vector over
+  the last 25 reports (~250 ms)**. Averaging cut frame-to-frame jitter from
+  ~±0.14° (single samples) to ~±0.01° on Mac14,5, for ~0.1 s of lag. Vectors
+  are averaged, not angles, so it stays correct at any tilt. Decoding (`gravity(fromReport:)`) and angle math
   (`tilt(x:y:z:)`) are pure functions covered by tests. A non-finite or zero
   vector counts as "no sample", so NaN never reaches the output.
 - Subtract the model offset with `ReferenceOffset.deviation(of:)`, which wraps
@@ -343,8 +347,9 @@ let package = Package(
   `--watch` with no sample for 2 s → restore cursor, exit `3`.
 - Device missing or can't be opened → exit `2` with a stderr reason.
 
-Tunables `MotionSensor.settleMs = 300`, `timeoutMs = 2000`, and the 500 ms watch
-interval are fixed constants by design (not flags).
+Tunables `MotionSensor.settleMs = 300`, `timeoutMs = 2000`, `windowSize = 25`,
+and the watch intervals (50 ms box, 500 ms JSONL/plain) are fixed constants by
+design (not flags).
 
 ### Renderer (watch mode)
 
