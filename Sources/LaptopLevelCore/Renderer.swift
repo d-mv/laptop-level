@@ -6,9 +6,15 @@ private let reset = "\u{001B}[0m"
 
 /// Green near level → yellow → red as tilt approaches full scale.
 private func colorForFraction(_ f: Double) -> String {
-    if f < 1.0 / 3 { return "\u{001B}[32m" }        // green
-    else if f < 2.0 / 3 { return "\u{001B}[33m" }   // yellow
-    else { return "\u{001B}[31m" }                  // red
+    if f < 1.0 / 3 {
+        return "\u{001B}[32m"
+    }  // green
+    else if f < 2.0 / 3 {
+        return "\u{001B}[33m"
+    }  // yellow
+    else {
+        return "\u{001B}[31m"
+    }  // red
 }
 
 func colorize(_ s: String, fraction: Double, _ on: Bool) -> String {
@@ -18,20 +24,21 @@ func colorize(_ s: String, fraction: Double, _ on: Bool) -> String {
 // MARK: - Renderer
 
 enum Renderer {
-    static let interiorWidth = 27    // → box is 29 wide incl. borders
-    static let interiorHeight = 9    // → box is 11 tall incl. borders (~3.75°/row)
-    static let fullScaleDeg = 15.0   // bubble pins to the edge at this tilt
+    static let interiorWidth = 27  // → box is 29 wide incl. borders
+    static let interiorHeight = 9  // → box is 11 tall incl. borders (~3.75°/row)
+    static let fullScaleDeg = 15.0  // bubble pins to the edge at this tilt
 
     /// The measurement readout — no verdict, just the two signed angles.
     /// `L/R` is roll (+ = right), `B/F` is pitch (+ = back).
-    static func readout(pitch: Double, roll: Double) -> String {
-        String(format: "L/R %+8.3f\u{00B0}   B/F %+8.3f\u{00B0}", tidyDeg(roll), tidyDeg(pitch))
+    static func readout(_ t: Tilt) -> String {
+        String(format: "L/R %+8.3f\u{00B0}   B/F %+8.3f\u{00B0}", tidyDeg(t.roll), tidyDeg(t.pitch))
     }
 
     /// Bubble-level frame: box + readout + hint, as individual lines.
-    static func frame(pitch: Double, roll: Double, color: Bool) -> [String] {
-        let cx = interiorWidth / 2          // 13
-        let cy = interiorHeight / 2         // 4
+    static func frame(_ t: Tilt, color: Bool) -> [String] {
+        let (pitch, roll) = (t.pitch, t.roll)
+        let cx = interiorWidth / 2  // 13
+        let cy = interiorHeight / 2  // 4
         let bx = cx + Int((clamp(roll / fullScaleDeg) * Double(cx)).rounded())
         let by = cy + Int((clamp(pitch / fullScaleDeg) * Double(cy)).rounded())
         let mag = min(1.0, hypot(roll, pitch) / fullScaleDeg)
@@ -40,17 +47,17 @@ enum Renderer {
         lines.append("┌" + String(repeating: "─", count: interiorWidth) + "┐")
         for row in 0..<interiorHeight {
             var cells = [String](repeating: " ", count: interiorWidth)
-            if row == cy {                              // center target guides
+            if row == cy {  // center target guides
                 cells[cx - 2] = "·"
                 cells[cx + 2] = "·"
             }
-            if row == by {                              // the bubble (wins overlap)
+            if row == by {  // the bubble (wins overlap)
                 cells[bx] = colorize("●", fraction: mag, color)
             }
             lines.append("│" + cells.joined() + "│")
         }
         lines.append("└" + String(repeating: "─", count: interiorWidth) + "┘")
-        lines.append(readout(pitch: pitch, roll: roll))
+        lines.append(readout(t))
         lines.append("Press Ctrl+C to stop")
         return lines
     }

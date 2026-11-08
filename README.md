@@ -63,11 +63,25 @@ Exit codes: `0` ok (or within tolerance under `--quiet`) · `1` over tolerance
 
 - ✅ Single-shot readout (`L/R`/`B/F`, plain / JSON), `--quiet` scripting gate,
   and `--watch` live bubble level on Mac14,5 (M2 Max). Sensor decoding and
-  directions verified by physically tilting the laptop. Directions: `L/R +` = right edge lower, `B/F +` = back edge lower.
+  directions verified by physically tilting the laptop. Directions: `L/R +` =
+  right edge lower, `B/F +` = back edge lower.
 - ⚠️ Only `Mac14,5` has a calibration entry; other models exit `2`. Its offset
   is `(0, 0)` — not yet measured on a bubble-level-verified surface (expected
   error well under 1°).
 - ℹ️ Versions before Nov 2026 read the ambient light sensor by mistake and did
   not measure tilt at all (see design doc → Sensor Access → History).
 
-Tests: `swift test`.
+## Development
+
+```bash
+git config core.hooksPath .githooks   # once per clone: enable the git hooks
+scripts/test-coverage.sh              # tests + 100% coverage gate
+scripts/lint.sh                       # lint (swift format, ships with Swift 6)
+scripts/check-format.sh               # format check
+```
+
+- `pre-commit`: format check, lint, tests with the 100% coverage gate.
+- `pre-push`: release build.
+
+All checks are local; there is no hosted CI. Details:
+[`docs/design.md` → Development](docs/design.md#development).

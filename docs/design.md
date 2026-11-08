@@ -291,19 +291,40 @@ a human-readable reason is written to **stderr**.
 
 ```
 laptop-level/
-├── Package.swift                 # SwiftPM manifest (macOS 12+, links IOKit)
-├── Sources/laptop-level/
-│   ├── main.swift                # Arg parsing, offset subtract, watch loop, exit codes
-│   ├── SensorReader.swift        # SPU accel via IOHIDManager reports → gravity → tilt
-│   ├── ModelOffsets.swift        # hw.model → reference offset table, angle wrapping
-│   └── Renderer.swift            # ASCII bubble level, ANSI/color
-└── Tests/laptop-levelTests/
-    └── TiltTests.swift           # report decoding, tilt vs logged samples, wrap, renderer
+├── Package.swift                     # SwiftPM manifest (macOS 12+)
+├── .swift-format                     # format + lint rules (toolchain swift-format)
+├── .githooks/                        # pre-commit, pre-push (enable: see Development)
+├── scripts/                          # check-format.sh, lint.sh, test-coverage.sh
+├── Sources/
+│   ├── laptop-level/main.swift       # entry point: CLI.run(arguments, deps: .live)
+│   └── LaptopLevelCore/              # all logic (library, 100% test coverage)
+│       ├── CLI.swift                 # arg parsing, single-shot, watch loop, exit codes
+│       ├── Dependencies.swift        # TiltSource protocol + injected I/O, clock, signals
+│       ├── HIDMotionSensor.swift     # SPU accel via IOHIDManager; Accel math helpers
+│       ├── ModelOffsets.swift        # hw.model → reference offset, angle wrapping
+│       └── Renderer.swift            # readout, ASCII bubble level, ANSI color
+└── Tests/LaptopLevelCoreTests/
+    ├── Support.swift                 # FakeSensor, Harness (fake clock/output), report()
+    ├── MathTests.swift               # decoding, tilt vs logged samples, averaging, offsets, renderer
+    ├── CLITests.swift                # parsing, single-shot and watch flows on fakes
+    └── HardwareTests.swift           # real sensor + real process dependencies
 ```
 
 **Status:** single-shot readout (plain + JSON), the `--quiet` gate and `--watch`
 verified against live hardware with physical tilt on Mac14,5. Reference offset
 still unmeasured (see above).
+
+### Architecture
+
+`main.swift` is one line; everything else lives in the `LaptopLevelCore`
+library so it can be tested. `CLI.run(arguments:deps:)` returns the exit code
+instead of calling `exit()`, and errors are a typed `CLIExit(code, message)`.
+
+Everything outside the tool's own logic comes in through `Dependencies`: the
+model name, a sensor factory (`TiltSource`), stdout/stderr writers, flush,
+`isTTY`, the environment, the clock (`now`), `sleep`, and signal-handler
+installation. `.live` wires the real ones; tests pass a `Harness` whose
+`sleep` advances a fake clock, so timeouts and the 300 ms settle run instantly.
 
 ### Package.swift
 
@@ -315,19 +336,17 @@ let package = Package(
     name: "laptop-level",
     platforms: [.macOS(.v12)],
     targets: [
-        .executableTarget(
-            name: "laptop-level",
-            linkerSettings: [
-                .linkedFramework("IOKit"),
-                .linkedFramework("CoreFoundation"),
-            ]
+        .target(
+            name: "LaptopLevelCore",
+            linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]
         ),
-        .testTarget(name: "laptop-levelTests", dependencies: ["laptop-level"]),
+        .executableTarget(name: "laptop-level", dependencies: ["LaptopLevelCore"]),
+        .testTarget(name: "LaptopLevelCoreTests", dependencies: ["LaptopLevelCore"]),
     ]
 )
 ```
 
-### SensorReader
+### Sensor (`HIDMotionSensor`)
 
 - Open the SPU accel device with `IOHIDManager` (see Sensor Access) and register
   an input-report callback on the current run loop.
@@ -335,9 +354,13 @@ let package = Package(
   the value is current, then returns the tilt of the **mean gravity vector over
   the last 25 reports (~250 ms)**. Averaging cut frame-to-frame jitter from
   ~±0.14° (single samples) to ~±0.01° on Mac14,5, for ~0.1 s of lag. Vectors
-  are averaged, not angles, so it stays correct at any tilt. Decoding (`gravity(fromReport:)`) and angle math
-  (`tilt(x:y:z:)`) are pure functions covered by tests. A non-finite or zero
-  vector counts as "no sample", so NaN never reaches the output.
+  are averaged, not angles, so it stays correct at any tilt.
+- Decoding (`Accel.gravity(fromReport:)`), averaging (`Accel.average`) and
+  angle math (`Accel.tilt`) are pure functions. A non-finite or zero vector
+  counts as "no sample", so NaN never reaches the output.
+- The device matching, first-report wait and read wait are init parameters, so
+  tests can reach the missing-device, driver-fallback and no-fresh-report paths
+  on real hardware.
 - Subtract the model offset with `ReferenceOffset.deviation(of:)`, which wraps
   both angles to (-180°, 180°].
 - **Settle:** discard readings for the first 300 ms, in both single-shot and
@@ -347,25 +370,28 @@ let package = Package(
   `--watch` with no sample for 2 s → restore cursor, exit `3`.
 - Device missing or can't be opened → exit `2` with a stderr reason.
 
-Tunables `MotionSensor.settleMs = 300`, `timeoutMs = 2000`, `windowSize = 25`,
-and the watch intervals (50 ms box, 500 ms JSONL/plain) are fixed constants by
+Tunables (`Timing.settle = 0.3 s`, `Timing.timeout = 2 s`, `Accel.windowSize =
+25`, watch intervals 50 ms box / 500 ms JSONL and plain) are fixed constants by
 design (not flags).
 
 ### Renderer (watch mode)
 
 - Detect TTY (`isatty(STDOUT_FILENO)`); non-TTY → plain line fallback.
 - Hide the cursor on start; each later frame moves up `interiorHeight + 4`
-  lines, then clears and redraws each line.
+  lines and rewrites every line in a single write, clearing each line's tail.
+  A `defer` restores the cursor on every exit path, including timeout.
 - `SIGINT`, `SIGTERM` and `SIGHUP` set a flag that ends the loop, so the cursor
   is always restored (exit `0`). `SIGPIPE` keeps its default action so a closed
   pipe ends the process.
 
 ### Arg parsing
 
-No external lib. `parse()` in `main.swift` walks `CommandLine.arguments` once;
+No external lib. `CLI.parse(_:)` walks the arguments once and returns `.help` or
+`.run(Options)`;
 each value flag reads the next argument and is validated on the spot
 (`--threshold` must be a number ≥ 0). Flag combinations are checked after the
-walk; any error exits `64` with a message on stderr.
+walk; any error throws `CLIExit(.usage, …)`, which `run` prints to stderr and
+turns into exit `64`.
 
 ---
 
@@ -375,15 +401,55 @@ walk; any error exits `64` with a message on stderr.
 # Build (the linker ad-hoc signs arm64 binaries; no extra codesign step needed)
 swift build -c release
 
-# Test
-swift test
-
 # Run
 .build/release/laptop-level
 
 # Install to PATH
 cp .build/release/laptop-level /usr/local/bin/
 ```
+
+---
+
+## Development
+
+### Tests and coverage
+
+```bash
+swift test                    # 49 tests
+scripts/test-coverage.sh      # tests + fails unless LaptopLevelCore is 100%
+                              # covered (regions, functions and lines)
+```
+
+Coverage is measured on `LaptopLevelCore`; `main.swift` (one line) is not.
+`HardwareTests` use the real accelerometer and skip on a Mac without one — so
+the 100% gate only passes on a supported Mac.
+
+### Lint and format
+
+Both use `swift format`, which ships with the Swift 6 toolchain (no extra
+install). Rules live in `.swift-format` (default rules, 120-column lines).
+
+```bash
+scripts/lint.sh               # swift format lint --strict
+scripts/check-format.sh       # fails if any file isn't formatted
+swift format format --in-place -r Sources Tests Package.swift   # fix formatting
+```
+
+### Git hooks (local only, no hosted CI)
+
+Hooks live in `.githooks/`. Enable once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+| Hook | Runs | Typical time |
+|---|---|---|
+| `pre-commit` | format check → lint → tests with the 100% coverage gate | ~3 s |
+| `pre-push` | `swift build -c release` | ~3 s |
+
+The checks run on the working tree, not only the staged changes. Skip in an
+emergency with `--no-verify`.
 
 ---
 

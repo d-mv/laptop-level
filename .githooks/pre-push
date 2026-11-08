@@ -1,0 +1,6 @@
+#!/bin/sh
+# Release build must succeed before pushing.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+echo "pre-push: release build"
+swift build -c release --quiet
