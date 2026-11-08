@@ -54,8 +54,8 @@ Read sequence (all symbols are **private SPI** — declared by hand, see below):
 
 ```
 IOHIDEventSystemClientCreate(kCFAllocatorDefault)
-  → set matching dict { PrimaryUsagePage: 0xff00, PrimaryUsage: 0x03 }   // the accel service
-  → IOHIDEventSystemClientCopyServices() → pick the accel IOHIDServiceClientRef
+  → IOHIDEventSystemClientCopyServices() → probe each service for an accel event,
+    keep the one that answers (no matching dict; see the usage 0x03/0x04 note below)
   → IOHIDServiceClientCopyEvent(service, kIOHIDEventTypeAccelerometer, 0, 0)
   → IOHIDEventGetFloatValue(event, field)   // field = (kIOHIDEventTypeAccelerometer << 16) + axis
 ```
@@ -342,7 +342,7 @@ tolerance check `--quiet` uses. Human-facing output never shows it.
 | `0` | Read OK (default/JSON), or within tolerance under `--quiet` |
 | `1` | `--quiet` only: tilt exceeded `--threshold` |
 | `2` | No usable sensor (Intel/unsupported, SPU accel absent, or SPI/signing blocked attach) |
-| `3` | Sensor present but no stable reading within timeout |
+| `3` | Sensor present but no stable reading within timeout (single-shot), or it stopped answering for 2 s (`--watch`) |
 | `64` | Usage error (bad flags / incompatible flag combination) — `EX_USAGE` |
 
 Without `--quiet`, a successful read always exits `0` — the tool reports the
@@ -411,36 +411,38 @@ let package = Package(
 
 ### SensorReader
 
-- Create `IOHIDEventSystemClient`, match the SPU accel service (usage page
-  `0xff00`, usage `0x03`).
+- Create `IOHIDEventSystemClient`, copy all services, and keep the first one
+  that answers an accelerometer event (no usage matching).
 - Poll `IOHIDServiceClientCopyEvent` for `kIOHIDEventTypeAccelerometer`; read
-  X/Y/Z float values; apply the calibrated axis mapping.
-- **Settle:** discard readings for the first ~300 ms (sensor warm-up / debounce);
-  require N consecutive samples within a small delta before reporting.
-- **Timeout:** if no stable reading within 2 s → exit `3`.
+  X/Y/Z float values; convert with `MotionSensor.tilt(x:y:z:)`. A non-finite or
+  zero vector counts as "no sample", so NaN never reaches the output.
+- Subtract the model offset with `ReferenceOffset.deviation(of:)`, which wraps
+  both angles to (-180°, 180°].
+- **Settle:** discard readings for the first 300 ms (sensor warm-up), in both
+  single-shot and `--watch`. Single-shot then reports once two consecutive
+  samples (50 ms apart) agree within 0.5°.
+- **Timeout:** single-shot with no stable reading within 2 s → exit `3`;
+  `--watch` with no sample for 2 s → restore cursor, exit `3`.
 - If the service can't be created/matched → exit `2` with a stderr reason.
 
-Tunables `SETTLE_MS = 300`, `WATCH_INTERVAL_MS = 500`, `TIMEOUT_MS = 2000` are
-fixed constants by design (not flags).
+Tunables `MotionSensor.settleMs = 300`, `timeoutMs = 2000`, and the 500 ms watch
+interval are fixed constants by design (not flags).
 
 ### Renderer (watch mode)
 
 - Detect TTY (`isatty(STDOUT_FILENO)`); non-TTY → plain line fallback.
-- Save cursor on first frame; subsequent frames move up N lines, erase, redraw.
-- Trap `SIGINT` to restore the cursor and exit cleanly (exit `0`).
+- Hide the cursor on start; each later frame moves up `interiorHeight + 4`
+  lines, then clears and redraws each line.
+- `SIGINT`, `SIGTERM` and `SIGHUP` set a flag that ends the loop, so the cursor
+  is always restored (exit `0`). `SIGPIPE` keeps its default action so a closed
+  pipe ends the process.
 
 ### Arg parsing
 
-No external lib. Simple `CommandLine.arguments` walk; validate combinations up
-front and exit `64` on any conflict:
-
-```swift
-// --threshold <value>
-if let i = args.firstIndex(of: "--threshold"), args.indices.contains(i + 1) {
-    guard let t = Double(args[i + 1]) else { usageError("invalid --threshold") }
-    threshold = t
-}
-```
+No external lib. `parse()` in `main.swift` walks `CommandLine.arguments` once;
+each value flag reads the next argument and is validated on the spot
+(`--threshold` must be a number ≥ 0). Flag combinations are checked after the
+walk; any error exits `64` with a message on stderr.
 
 ---
 

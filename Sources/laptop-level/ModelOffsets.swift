@@ -11,6 +11,18 @@ import Foundation
 struct ReferenceOffset {
     let pitch0: Double
     let roll0: Double
+
+    /// Raw angles minus this reference, wrapped to (-180, 180].
+    func deviation(of raw: Tilt) -> Tilt {
+        Tilt(pitch: wrapDeg(raw.pitch - pitch0), roll: wrapDeg(raw.roll - roll0))
+    }
+}
+
+/// Wrap an angle to (-180, 180]; also turns -0.0 into 0.0.
+func wrapDeg(_ v: Double) -> Double {
+    let w = v.truncatingRemainder(dividingBy: 360)
+    let r = w > 180 ? w - 360 : (w <= -180 ? w + 360 : w)
+    return r + 0.0
 }
 
 let modelOffsets: [String: ReferenceOffset] = [

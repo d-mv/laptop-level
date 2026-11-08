@@ -126,18 +126,40 @@ func runWatch(_ opts: Options, _ offset: ReferenceOffset) -> Never {
     do { sensor = try MotionSensor() }
     catch { die(.noSensor, "error: no readable motion sensor (unsupported hardware or blocked SPI)") }
 
-    signal(SIGINT) { _ in interrupted = 1 }
+    // Ctrl+C, `kill`, and a closed terminal all stop the loop cleanly, so the
+    // cursor is always restored.
+    for sig in [SIGINT, SIGTERM, SIGHUP] { signal(sig) { _ in interrupted = 1 } }
     // Foundation ignores SIGPIPE, so a closed reader (e.g. `| head`) would spin
     // forever. Restore default disposition: exit when the pipe breaks.
     signal(SIGPIPE, SIG_DFL)
     let frameHeight = Renderer.interiorHeight + 4   // box + status + hint
     var first = true
-    if isTTY && !opts.json { print("\u{001B}[?25l", terminator: "") }   // hide cursor
+    let drawsBox = isTTY && !opts.json
+    if drawsBox { print("\u{001B}[?25l", terminator: "") }   // hide cursor
+    func restoreCursor() {
+        if drawsBox { print("\u{001B}[?25h", terminator: ""); fflush(stdout) }
+    }
+
+    // Same tunables as single-shot: discard warm-up samples, and give up if
+    // the sensor stops answering.
+    let start = Date()
+    let settleUntil = start.addingTimeInterval(Double(MotionSensor.settleMs) / 1000)
+    var lastSample = start
 
     while interrupted == 0 {
-        guard let raw = sensor.currentTilt() else { usleep(200_000); continue }
-        let pitch = (raw.pitch - offset.pitch0) + 0.0
-        let roll = (raw.roll - offset.roll0) + 0.0
+        guard let raw = sensor.currentTilt() else {
+            if Date().timeIntervalSince(lastSample) * 1000 > Double(MotionSensor.timeoutMs) {
+                restoreCursor()
+                die(.timeout, "error: sensor stopped answering")
+            }
+            usleep(50_000)
+            continue
+        }
+        lastSample = Date()
+        if lastSample < settleUntil { usleep(50_000); continue }
+        let dev = offset.deviation(of: raw)
+        let pitch = dev.pitch
+        let roll = dev.roll
 
         if opts.json {
             let straight = deviation(pitch: pitch, roll: roll, metric: opts.metric) <= opts.threshold
@@ -155,7 +177,7 @@ func runWatch(_ opts: Options, _ offset: ReferenceOffset) -> Never {
         fflush(stdout)
         usleep(500_000)
     }
-    if isTTY && !opts.json { print("\u{001B}[?25h", terminator: "") }   // restore cursor
+    restoreCursor()
     exit(0)
 }
 
@@ -182,8 +204,9 @@ do {
     die(.noSensor, "error: \(error)")
 }
 
-let pitch = (raw.pitch - offset.pitch0) + 0.0   // `+ 0.0` collapses -0.0 → 0.0
-let roll = (raw.roll - offset.roll0) + 0.0
+let dev = offset.deviation(of: raw)
+let pitch = dev.pitch
+let roll = dev.roll
 
 // --quiet is the only verdict path: silent, exit reflects the threshold. The
 // default output just reports the measurement and exits 0.

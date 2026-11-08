@@ -44,7 +44,8 @@ final class MotionSensor {
         self.service = service
     }
 
-    /// One raw gravity sample → pitch/roll, or nil if the event didn't arrive.
+    /// One raw gravity sample → pitch/roll, or nil if the event didn't arrive
+    /// or carried no usable vector.
     func currentTilt() -> Tilt? {
         guard let ev = IOHIDServiceClientCopyEvent(service, Int64(kIOHIDEventTypeAccelerometer), 0, 0) else {
             return nil
@@ -62,7 +63,11 @@ final class MotionSensor {
     /// Y–Z plane, and roll is measured against the full Y–Z component. Using
     /// `atan2(x, z)` for roll instead would inflate it by 1/cos(pitch) (~1.5×)
     /// and leak pitch into roll.
-    static func tilt(x: Double, y: Double, z: Double) -> Tilt {
+    ///
+    /// Returns nil for a non-finite or zero vector (no gravity data), so NaN
+    /// never reaches the output.
+    static func tilt(x: Double, y: Double, z: Double) -> Tilt? {
+        guard x.isFinite, y.isFinite, z.isFinite, x != 0 || y != 0 || z != 0 else { return nil }
         let yz = hypot(y, z)
         let pitch = atan2(y, z) * 180.0 / .pi
         let roll = atan2(x, yz) * 180.0 / .pi
@@ -71,7 +76,10 @@ final class MotionSensor {
 
     /// Single-shot: discard warm-up samples, then require two consecutive close
     /// readings before reporting. Throws `.timeout` if none stabilize in time.
-    static func read(settleMs: Int = 300, timeoutMs: Int = 2000) throws -> Tilt {
+    static let settleMs = 300
+    static let timeoutMs = 2000
+
+    static func read(settleMs: Int = MotionSensor.settleMs, timeoutMs: Int = MotionSensor.timeoutMs) throws -> Tilt {
         let sensor = try MotionSensor()
         let start = Date()
         let settleUntil = start.addingTimeInterval(Double(settleMs) / 1000.0)
