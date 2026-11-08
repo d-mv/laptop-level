@@ -3,16 +3,18 @@ import Foundation
 /// Per-model reference pose. The SPU accelerometer carries a large constant
 /// mounting offset, so "straight" is defined as deviation from these values.
 ///
-/// ⚠️ Mac14,5 value captured in an arbitrary pose during the SPI spike — it is a
-/// PLACEHOLDER and must be re-measured on a verified-level surface. See
-/// docs/design.md → "Calibration / reference pose".
+/// Values are in the convention of `MotionSensor.tilt(x:y:z:)`.
+///
+/// ⚠️ Mac14,5 value comes from the spike's raw sample (x≈1000, y≈9600, z≈8080),
+/// taken in an arbitrary pose — it is a PLACEHOLDER and must be re-measured on
+/// a verified-level surface. See docs/design.md → "Calibration / reference pose".
 struct ReferenceOffset {
     let pitch0: Double
     let roll0: Double
 }
 
 let modelOffsets: [String: ReferenceOffset] = [
-    "Mac14,5": ReferenceOffset(pitch0: 49.7, roll0: 7.1),
+    "Mac14,5": ReferenceOffset(pitch0: 49.9, roll0: 4.6),
 ]
 
 /// Reads `hw.model` (e.g. "Mac14,5").

@@ -50,11 +50,22 @@ final class MotionSensor {
             return nil
         }
         defer { HIDEventRelease(ev) }
-        let x = IOHIDEventGetFloatValue(ev, HIDAccelField(0))
-        let y = IOHIDEventGetFloatValue(ev, HIDAccelField(1))
-        let z = IOHIDEventGetFloatValue(ev, HIDAccelField(2))
-        let roll = atan2(x, z) * 180.0 / .pi               // raw units cancel in atan2
-        let pitch = atan2(y, hypot(x, z)) * 180.0 / .pi
+        return Self.tilt(x: IOHIDEventGetFloatValue(ev, HIDAccelField(0)),
+                         y: IOHIDEventGetFloatValue(ev, HIDAccelField(1)),
+                         z: IOHIDEventGetFloatValue(ev, HIDAccelField(2)))
+    }
+
+    /// Gravity vector → raw pitch/roll (degrees). Raw units cancel in atan2.
+    ///
+    /// The sensor sits in the base but is rotated ~50° about its X axis, so
+    /// gravity is split between Y and Z. Pitch is therefore the angle within the
+    /// Y–Z plane, and roll is measured against the full Y–Z component. Using
+    /// `atan2(x, z)` for roll instead would inflate it by 1/cos(pitch) (~1.5×)
+    /// and leak pitch into roll.
+    static func tilt(x: Double, y: Double, z: Double) -> Tilt {
+        let yz = hypot(y, z)
+        let pitch = atan2(y, z) * 180.0 / .pi
+        let roll = atan2(x, yz) * 180.0 / .pi
         return Tilt(pitch: pitch, roll: roll)
     }
 

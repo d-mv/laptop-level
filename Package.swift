@@ -14,5 +14,9 @@ let package = Package(
                 .linkedFramework("CoreFoundation"),
             ]
         ),
+        .testTarget(
+            name: "laptop-levelTests",
+            dependencies: ["laptop-level"]
+        ),
     ]
 )

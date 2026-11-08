@@ -19,7 +19,7 @@ func colorize(_ s: String, fraction: Double, _ on: Bool) -> String {
 
 enum Renderer {
     static let interiorWidth = 27    // → box is 29 wide incl. borders
-    static let interiorHeight = 3    // → box is 5 tall incl. borders
+    static let interiorHeight = 9    // → box is 11 tall incl. borders (~3.75°/row)
     static let fullScaleDeg = 15.0   // bubble pins to the edge at this tilt
 
     /// The measurement readout — no verdict, just the two signed angles.
@@ -31,7 +31,7 @@ enum Renderer {
     /// Bubble-level frame: box + readout + hint, as individual lines.
     static func frame(pitch: Double, roll: Double, color: Bool) -> [String] {
         let cx = interiorWidth / 2          // 13
-        let cy = interiorHeight / 2         // 1
+        let cy = interiorHeight / 2         // 4
         let bx = cx + Int((clamp(roll / fullScaleDeg) * Double(cx)).rounded())
         let by = cy + Int((clamp(pitch / fullScaleDeg) * Double(cy)).rounded())
         let mag = min(1.0, hypot(roll, pitch) / fullScaleDeg)

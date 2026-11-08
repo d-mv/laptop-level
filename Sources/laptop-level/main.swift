@@ -130,7 +130,7 @@ func runWatch(_ opts: Options, _ offset: ReferenceOffset) -> Never {
     // Foundation ignores SIGPIPE, so a closed reader (e.g. `| head`) would spin
     // forever. Restore default disposition: exit when the pipe breaks.
     signal(SIGPIPE, SIG_DFL)
-    let frameHeight = Renderer.interiorHeight + 4   // box(5) + status + hint = 7
+    let frameHeight = Renderer.interiorHeight + 4   // box + status + hint
     var first = true
     if isTTY && !opts.json { print("\u{001B}[?25l", terminator: "") }   // hide cursor
 

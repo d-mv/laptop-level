@@ -44,10 +44,16 @@ L/R   -0.026°   B/F   -0.494°
 ```
 ┌───────────────────────────┐
 │                           │
+│                           │
+│                           │
+│                           │
 │           · ● ·           │
 │                           │
+│                           │
+│                           │
+│                           │
 └───────────────────────────┘
-L/R   -0.026°   B/F   -0.494°
+L/R   -0.157°   B/F   -0.327°
 Press Ctrl+C to stop
 ```
 
@@ -60,6 +66,10 @@ Exit codes: `0` ok (or within tolerance under `--quiet`) · `1` over tolerance
   verified on Mac14,5 (M2 Max).
 - ✅ `--watch` live ASCII bubble level: in-place TTY redraw, JSONL when piped,
   plain non-TTY fallback, clean SIGINT/SIGPIPE handling.
-- ⚠️ Only `Mac14,5` has a calibration entry; other models exit `2`. The offset
-  is a placeholder pending a verified-level measurement, and it's unconfirmed
-  whether the sensor is base- or lid-mounted (see design doc).
+- ✅ Sensor confirmed **base-mounted** (lid sweep doesn't move the reading), so
+  screen angle doesn't affect the result.
+- ⚠️ Only `Mac14,5` has a calibration entry; other models exit `2`. Its offset
+  is a **placeholder** from an arbitrary pose, so angles are relative to that
+  pose — not to true level — until re-measured on a verified-level surface.
+
+Tests: `swift test`.

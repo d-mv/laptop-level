@@ -79,6 +79,10 @@ A standalone C spike (declared the six SPI symbols, linked `IOKit` +
 - Live read: `raw(x≈1000, y≈9600, z≈8080)`, vector magnitude **≈ 12,500**
   (raw units, **not** normalized to 1 g — irrelevant for `atan2`, which uses
   ratios).
+- ⚠️ **The raw scale is not stable.** A later read (2026-11-08) gave a
+  magnitude of ≈ 1,700, drifting ±5% over a few seconds while the laptop sat
+  still, with the angles steady to ~0.05°. Use the vector only for ratios —
+  never treat its magnitude as g or use it for motion/sanity checks.
 - Five samples over 1 s agreed to within ~0.1° (sensor is low-noise), while
   magnitude crept 12527 → 12594 — **confirming the warm-up settle delay is real
   and necessary.**
@@ -87,9 +91,10 @@ A standalone C spike (declared the six SPI symbols, linked `IOKit` +
 
 ### Calibration consequence (decision needed)
 
-At physical rest the spike read **pitch ≈ +49.7°, roll ≈ +7.1°**, not `(0, 0)`.
-The sensor carries a large constant **mounting offset** (the accelerometer
-appears to sit in the display/lid or is mounted at a fixed rotation). Therefore
+At physical rest the sensor reads **pitch ≈ +49.9°, roll ≈ +4.6°** (current
+formulas), not `(0, 0)`. The sensor carries a large constant **mounting
+offset**: it sits in the **base**, rotated ~50° about its X axis (see
+[Sensor location](#sensor-location-resolved-base-mounted)). Therefore
 "straight" **cannot** be defined as raw `(0, 0)`; the tool must subtract a
 **reference pose** `(pitch₀, roll₀)` captured when the machine is known-level,
 and test the *deviation* `(pitch − pitch₀, roll − roll₀)` against the threshold.
@@ -103,22 +108,36 @@ model → exit `2` (unsupported), with a stderr hint to contribute a measurement
 
 ```swift
 // ModelOffsets.swift — extend as models are measured on a known-level surface
-let modelOffsets: [String: (pitch0: Double, roll0: Double)] = [
-    "Mac14,5": (pitch0: 49.7, roll0: 7.1),   // M2 Max 16" — PLACEHOLDER, re-measure level
+let modelOffsets: [String: ReferenceOffset] = [
+    "Mac14,5": ReferenceOffset(pitch0: 49.9, roll0: 4.6),   // PLACEHOLDER, re-measure level
 ]
 ```
 
-> ⚠️ **Two caveats baked into bring-up:**
-> 1. The `Mac14,5` value above was captured in an *arbitrary* pose, not a
->    verified-level one. Re-measure on a known-flat surface (real bubble level)
->    before trusting it.
-> 2. **Open question — is the accelerometer in the base or the lid?** The ~50°
->    rest pitch is consistent with a lid-mounted sensor. If lid-mounted, the
->    offset varies with *lid angle*, and a single hard-coded constant is wrong
->    whenever the user changes the screen angle. Bring-up MUST test this: read
->    pitch at two different lid angles. If pitch tracks lid angle, this whole
->    approach needs rethinking (e.g. fuse with the lid-angle sensor, or use only
->    the base-normal gravity component). Resolve before shipping.
+> ⚠️ The `Mac14,5` value above comes from the spike's raw sample, taken in an
+> *arbitrary* pose, not a verified-level one. Re-measure on a known-flat
+> surface (real bubble level) before trusting it. Offsets are only valid for
+> the formulas in [Deriving pitch & roll](#deriving-pitch--roll-from-gravity);
+> re-capture them if those formulas change.
+
+### Sensor location (resolved: base-mounted)
+
+The ~50° rest pitch first suggested a lid-mounted sensor, which would have made
+a fixed offset useless. Tested on Mac14,5 (2026-11-08) by logging the
+lid-angle sensor (HID usage page `0x20`, usage `0x8A`, feature report 1,
+angle = little-endian bytes 1–2) next to the accelerometer while moving the
+lid:
+
+| Lid angle | B/F (pitch) |
+|---|---|
+| 112° | 49.5° |
+| 54° | 49.5° |
+| 7° | 48.0° |
+| 99° | 49.8° |
+| 110° | 49.7° |
+
+A ~105° lid sweep moved pitch by ≤ 2° (the dip near closed is consistent with
+hand pressure on the base). **The accelerometer is in the base**; the ~50° is a
+fixed mounting rotation, so a per-model constant offset is valid.
 
 ### Axis orientation is undocumented → one-time calibration
 
@@ -131,14 +150,25 @@ constant determined once.
 
 ### Deriving pitch & roll from gravity
 
-Given the gravity vector `(gx, gy, gz)` in g-units after axis mapping:
+Given the raw gravity vector `(gx, gy, gz)` (units cancel):
 
 ```
-roll  = atan2(gx, gz) * 180/π        // left/right tilt
-pitch = atan2(gy, hypot(gx, gz)) * 180/π   // front/back tilt
+pitch = atan2(gy, gz) * 180/π               // back/front tilt (B/F)
+roll  = atan2(gx, hypot(gy, gz)) * 180/π    // left/right tilt (L/R)
 ```
 
-Exact axis assignment is fixed by the calibration step above.
+then subtract the per-model `(pitch₀, roll₀)`.
+
+Why these and not `roll = atan2(gx, gz)`, `pitch = atan2(gy, hypot(gx, gz))`:
+the sensor is rotated ~50° about X, so at rest gravity is split between Y and Z.
+With `atan2(gx, gz)`, Z carries only cos 50° ≈ 0.65 of gravity, so roll was
+inflated ~1.5× (a true 5° read as ~7.6°) and pitch leaked into roll; subtracting
+angle offsets did not cancel that. Measuring pitch inside the Y–Z plane and
+roll against the full Y–Z component makes the subtraction exact for a mounting
+rotation about X (covered by `Tests/laptop-levelTests/TiltTests.swift`).
+
+Sign conventions (`+` = right / back) are still pending the physical axis
+calibration step above.
 
 ### Distribution constraints (consequences of using SPI)
 
@@ -176,10 +206,11 @@ walls:
    table is horizontal*. On a sloped desk, a flush laptop reads tilted and a
    "level" laptop isn't flush. The sensor has no table reference.
 
-3. **The sensor is (probably) lid-mounted** (see calibration note above), so the
-   tilt describes the display, not the base.
+3. ~~The sensor is lid-mounted~~ — **disproved**: the sensor is in the base
+   (see [Sensor location](#sensor-location-resolved-base-mounted)), so the tilt
+   describes the base and does not change with screen angle.
 
-A physical bubble level shares walls #1 and #2 and nobody objects, because
+A physical bubble level shares both remaining walls and nobody objects, because
 "level" is understood as *relative to gravity*. So the honest design is: **report
 the two gravity-relative angles, label their directions, and let the user judge.**
 Hence no "Straight/Tilted" verdict in the default output.
@@ -252,10 +283,16 @@ Live **ASCII bubble level**, updated in-place via ANSI cursor moves
 ```
 ┌───────────────────────────┐
 │                           │
+│                           │
+│                           │
+│                           │
 │           · ● ·           │   ← bubble moves with tilt
 │                           │
+│                           │
+│                           │
+│                           │
 └───────────────────────────┘
-L/R   -0.026°   B/F   -0.494°
+L/R   -0.157°   B/F   -0.327°
 Press Ctrl+C to stop
 ```
 
@@ -264,7 +301,8 @@ Press Ctrl+C to stop
 - **Color is a magnitude scale, not a verdict:** green near center → yellow →
   red toward the edge (thirds of full scale). It visualizes *how far off level*,
   not "good/bad".
-- Box is 29×5 chars, redrawn in-place each frame.
+- Box is 29×11 chars, redrawn in-place each frame. Resolution ≈ 1.15°/column
+  (L/R) and 3.75°/row (B/F); the bubble leaves the center row at |B/F| ≥ ~1.9°.
 - If stdout is **not a TTY**, `--watch` falls back to plain readout lines
   (one per refresh) instead of cursor manipulation.
 
@@ -330,6 +368,9 @@ laptop-level/
         ├── SensorReader.swift    # SPU accel via IOHIDEventSystemClient, gravity→pitch/roll  ✅ built
         ├── ModelOffsets.swift    # hw.model → reference offset table  ✅ built
         └── Renderer.swift        # ASCII bubble level, ANSI/color, TTY  ✅ built
+Tests/
+└── laptop-levelTests/
+    └── TiltTests.swift           # tilt math vs mounting offset, renderer geometry (`swift test`)
 ```
 
 The private HID symbols cannot be imported from a public framework, so they are
